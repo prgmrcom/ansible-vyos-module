@@ -1,0 +1,49 @@
+#!/bin/vbash
+
+# The purpose of this module is to remove stale API sessions.
+# Arguments: none
+
+# Copyright 2015 prgmr.com
+# Author: Sarah Newman <srn@prgmr.com>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+if [ "$(id -g -n)" != 'vyattacfg' ] ; then
+	exec sg vyattacfg -c "/bin/vbash $(readlink -f $0) $@"
+fi
+
+vyatta_sbindir=/opt/vyatta/sbin
+export vyatta_sbindir
+PATH=$PATH:$vyatta_sbindir
+# Obtain session environment
+
+if [ "$(ls -d /opt/vyatta/config/tmp/tmp_* | wc -l)" = "0" ] ; then
+	echo "{\"changed\": \"false\"}"
+	exit 0
+fi
+ 
+cmdout=""
+for pid in $(ls -d /opt/vyatta/config/tmp/tmp_* | cut -f2 -d_); do
+
+	session_env=$(cli-shell-api getSessionEnv $pid)
+
+	eval $session_env
+
+	cmdout="$cmdout $(my_discard 2>&1)"
+	cmdout="$cmdout $(cli-shell-api teardownSession  2>&1)"
+done
+
+cmdout="$(echo "$cmdout" | tr '\n' '\r' | sed 's#\r#\\n#g')"
+echo "{\"changed\": \"true\", \"cmdout\": \"$cmdout\"}"
+exit 0

@@ -1,0 +1,139 @@
+#!/bin/vbash
+
+# Arguments: One or more lines containing 'set <path>', 'delete <path>',
+#  'config', or 'save [optional file path]'
+
+# WARNING this module requires the use of eval for it to work with output from 'show configuration commands'
+# Do not use with untrusted input
+
+# Use 'vyos' and 'vyos-check' + "'always_run': true" together to emulate check mode
+# Example:
+#  - vyos: "set system console device ttyS0 speed '115200'"
+#  - vyos-check: "set system console device ttyS0 speed '115200'"
+#    always_run: true
+
+# Copyright 2015 prgmr.com
+# Author: Sarah Newman <srn@prgmr.com>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+set -o nounset
+set -o pipefail
+set -e
+
+if [ "$(id -g -n)" != 'vyattacfg' ] ; then
+	exec sg vyattacfg -c "/bin/vbash $(readlink -f $0) $@"
+fi
+
+vyatta_sbindir=/opt/vyatta/sbin
+export vyatta_sbindir
+PATH=$PATH:$vyatta_sbindir
+# Obtain session environment
+session_env=$(cli-shell-api getSessionEnv $PPID)
+
+# Evaluate environment string
+eval $session_env
+
+# Setup the session
+cli-shell-api setupSession
+if [ $? -ne 0 ]; then
+	echo "Something went wrong!"
+	exit 1
+fi
+cmdout=""
+
+function atexit() {
+	trap - EXIT
+	set +o nounset
+	set +o pipefail
+	set +e
+	cmdout="$cmdout $(my_discard 2>&1)"
+	cmdout="$cmdout $(cli-shell-api teardownSession  2>&1)"
+	cmdout="$(echo "$cmdout" | tr '\n' '\r' | sed 's#\r#\\n#g')"
+	if [ "$changed" = "true" ]; then
+		echo "{\"failed\": True, \"cmdout\": \"$cmdout\", \"changes\": \"$changes\", \"changes_lines\": [$(echo $changes | sed -r -e 's#^\\n#"#g' -e 's#\\n#", "#g')\"] }"
+	else
+		echo "{\"failed\": True, \"cmdout\": \"$cmdout\", \"changes\": \"$changes\", \"changes_lines\": [] }"
+	fi
+	exit 1
+}
+trap atexit EXIT
+changes=""
+config=""
+changed=false
+function maybe_set() {
+	local path="$@"
+	path=$(echo "$path" | sed -r -e 's#^ +##g' -e 's# +$##g' -e 's#  +##g')
+	if ! eval cli-shell-api exists $path ; then
+		changes="$changes\nset $path"
+		cmdout="$cmdout $(eval my_set $path 2>&1)"
+		changed=true
+	fi
+}
+
+function maybe_delete() {
+	local path="$@"
+	path=$(echo "$path" | sed -r -e 's#^ +##g' -e 's# +$##g' -e 's#  +##g')
+	if eval cli-shell-api exists $path ; then
+		changes="$changes\ndelete $path"
+		path=$(echo "$path" | sed -r -e 's# next-hop.+##g')
+		cmdout="$cmdout $(eval my_delete $path 2>&1)"
+		changed=true
+	fi
+}
+
+function save_if_not_check() {
+	path=$(echo "$path" | sed -r -e 's#^ +##g' -e 's# +$##g' -e 's#  +##g')
+	changes="$changes\nsaved $path"
+	changed=true
+	if ! echo "$0" | grep -Eq "check$"; then
+		cmdout="$cmdout $(vyatta-save-config.pl $path 2>&1)"
+	fi
+}
+
+echo >> "$1"
+while read command; do
+	function=$(echo $command | cut -f1 -d" ")
+	args=$(echo $command | cut -f2- -d" ")
+	if echo "$args" | grep -Eq '[\!\&\(\)\|\<\>\`\;\*\?\$\{\}\~]' ; then
+		echo "Bad argument $args" >&2
+		exit 1
+	fi
+	case "$function" in
+		set) maybe_set $args ;;
+		delete) maybe_delete $args ;;
+		save) save_if_not_check $args ;;
+		config) changes="$changes $(cli-shell-api showConfig --show-hide-secrets | tr '"' "'" | tr '\n' '`' | sed 's#`#\\n#g')" ;;
+		"") ;;
+		*\#*) ;;
+		*) echo "Bad operation $function" >&2; exit 1 ;; 
+	esac
+done < "$1"
+if echo "$0" | grep -Eq "check$"; then
+	cmdout="$cmdout $(my_discard 2>&1)"
+else
+	cmdout="$cmdout $(my_commit 2>&1)"
+fi
+
+cmdout="$cmdout $(my_discard 2>&1)"
+cmdout="$cmdout $(cli-shell-api teardownSession  2>&1)"
+cmdout="$(echo "$cmdout" | tr '\n' '\r' | sed 's#\r#\\n#g')"
+
+if [ "$changed" = "true" ]; then
+	echo "{\"changed\": $changed, \"cmdout\": \"$cmdout\", \"changes\": \"$changes\", \"changes_lines\": [$(echo $changes | sed -r -e 's#^\\n#"#g' -e 's#\\n#", "#g')\"] }"
+else
+	echo "{\"changed\": $changed,  \"cmdout\": \"$cmdout\", \"changes\": \"$changes\", \"changes_lines\": [] }"
+fi
+
+trap - EXIT
