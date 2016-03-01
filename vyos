@@ -94,6 +94,7 @@ function maybe_delete() {
 }
 
 function save_if_not_check() {
+	local path="$@"
 	path=$(echo "$path" | sed -r -e 's#^ +##g' -e 's# +$##g' -e 's#  +##g')
 	changes="$changes\nsaved $path"
 	changed=true
@@ -113,7 +114,7 @@ while read command; do
 	case "$function" in
 		set) maybe_set $args ;;
 		delete) maybe_delete $args ;;
-		save) save_if_not_check $args ;;
+		save) [ "$command" = "save" ] && args="/config/config.boot"; save_if_not_check $args ;;
 		config) changes="$changes $(cli-shell-api showConfig --show-hide-secrets | tr '"' "'" | tr '\n' '`' | sed 's#`#\\n#g')" ;;
 		"") ;;
 		*\#*) ;;
